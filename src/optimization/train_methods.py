@@ -47,6 +47,226 @@ logger = logging.getLogger(__name__)
 # -----------------------------------------------------------------
 #                                 Methods
 # -----------------------------------------------------------------
+class ModelWithNMSLossAugmentedWithCrossAttention(nn.Module):
+    def __init__(self, student_model, teacher_models, criterion_main, criterion_div, criterion_kd, config, valid_classes_dict):
+        super().__init__()
+        self.criterion_main = criterion_main
+        self.criterion_div = criterion_div
+        self.criterion_kd = criterion_kd
+        self.student_model = student_model
+        self.teacher_models = teacher_models
+        self.config = config
+        self.valid_classes_dict = valid_classes_dict
+        self.cross_attention_rgb = nn.MultiheadAttention(
+            embed_dim=config['cross_attention_embed_dim'],
+            num_heads=config['cross_attention_num_heads'],
+            dropout=config['cross_attention_dropout']
+        )
+        self.cross_attention_thermal = nn.MultiheadAttention(
+            embed_dim=config['cross_attention_embed_dim'],
+            num_heads=config['cross_attention_num_heads'],
+            dropout=config['cross_attention_dropout']
+        )
+        self.cross_attention_depth = nn.MultiheadAttention(
+            embed_dim=config['cross_attention_embed_dim'],
+            num_heads=config['cross_attention_num_heads'],
+            dropout=config['cross_attention_dropout']
+        )
+    def average_batch_0_1(self, features_t):
+
+        # features_t is a list
+        with torch.no_grad():
+            for i in range(len(features_t)):
+                features_t[i][1] = (features_t[i][0] + features_t[i][1])/2
+                # Remove the first batch as it has been averaged with the second
+                #features_t[i] = features_t[i][1:]
+                # DOnt remove because of RuntimeError: one of the variables needed for gradient computation has been modified by an inplace operation
+                # we can stil use the batch 0, will be an extra image I guess
+
+        return features_t
+
+    def merge_batch_0_1(self, audio):
+
+        # The spectrogram is the square of the complex magnitude of the STFT
+        # spectrogram_librosa = np.abs(librosa.stft(
+        #    y, n_fft=n_fft, hop_length=hop_length, win_length=n_fft, window='hann'
+        #)) ** 2
+        # then we calculate the log10 of that
+        # There is no way around the non linear square magnitue, only if the two
+        # inputs are uncorrelated, this make sense. We assume that the likelihood of
+        # taking a image from different drives is high so this term will be uncorrelated
+        # https://stackoverflow.com/questions/36817236/spectrogram-of-two-audio-files-added-together
+        # we approximate this via og((|stft(a) + stft(b)|)^2) = log(|stft(a)|^2) + log(|stft(b)|^2)
+        with torch.no_grad():
+            audio[1] = torch.pow(audio[0], 10) + torch.pow(audio[1], 10)
+            eps = 1e-7
+            audio[1][audio[1]<eps] = eps
+            audio[1] = torch.log10(audio[1])
+
+        #audio = audio[1:]
+        return audio
+
+    def forward(self, rgb, thermal, depth, audio, label, validate=False, augment=False):
+
+        # TODO, check for rgb.shape greater than 2... but unlickely case
+
+        kd_losses = []
+        if augment:
+            audio = self.merge_batch_0_1(audio)
+
+        logits_s, features_s = self.student_model(audio)
+        batch_labels = [[] for i in range(rgb.shape[0])]
+        for modality, teacher_model in self.teacher_models.items():
+            with torch.no_grad():
+                if modality == 'rgb':
+                    prediction, features_t = teacher_model(rgb)
+                elif modality == 'audio':
+                    prediction, features_t = teacher_model(audio)
+                elif modality == 'thermal':
+                    prediction, features_t = teacher_model(thermal)
+                elif modality == 'depth':
+                    prediction, features_t = teacher_model(depth)
+                else:
+                    raise ValueError('No valid modality to predict from teacher')
+                # Detach for kd loss calculation
+                if isinstance(features_t, tuple) or isinstance(features_t, list):
+                    features_t = [f.detach() for f in features_t]
+                else:
+                    features_t = features_t.detach()
+
+                # we have to average the feature 0 and feature 1
+                # to comply with augmentation
+                if augment:
+                    features_t = self.average_batch_0_1(features_t)
+
+                this_batch_labels = logits_to_ground_truth(
+                    logits=prediction,
+                    anchors=None,
+                    valid_classes_dict=self.valid_classes_dict,
+                    config=self.config,
+                    include_scores=True,
+                )
+
+            #####
+            print(features_t.shape, features_s.shape)
+            
+            # the cross-attention between Teacher: features_t and Student: features_s
+            if self.config.getboolean('use_cross_attention'):
+                # We need to reshape the features to match the expected input of the cross-attention
+                features_s_reshaped = features_s.view(features_s.size(0), -1, features_s.size(-1)).permute(1, 0, 2)
+                features_t_reshaped = features_t.view(features_t.size(0), -1, features_t.size(-1)).permute(1, 0, 2)
+
+                if modality == 'rgb':
+                    # Apply cross-attention
+                    attn_output, _ = self.cross_attention_rgb(features_s_reshaped, features_t_reshaped, features_t_reshaped)
+                    attn_map = attn_output.permute(1, 0, 2).view(features_s.size())
+
+                    # add this attention map to both feature_s and feature_t
+                    features_s = features_s + attn_map
+                    features_t = features_t + attn_map
+                
+                elif modality == 'thermal':
+                    # Apply cross-attention
+                    attn_output, _ = self.cross_attention_thermal(features_s_reshaped, features_t_reshaped, features_t_reshaped)
+                    attn_map = attn_output.permute(1, 0, 2).view(features_s.size())
+
+                    # add this attention map to both feature_s and feature_t
+                    features_s = features_s + attn_map
+                    features_t = features_t + attn_map
+                
+                elif modality == 'depth':
+                    # Apply cross-attention
+                    attn_output, _ = self.cross_attention_depth(features_s_reshaped, features_t_reshaped, features_t_reshaped)
+                    attn_map = attn_output.permute(1, 0, 2).view(features_s.size())
+
+                    # add this attention map to both feature_s and feature_t
+                    features_s = features_s + attn_map
+                    features_t = features_t + attn_map
+
+
+                loss_kd = torch.zeros(1)
+                if self.criterion_kd is not None:
+                    # Due to parallel execution
+                    loss_kd = self.criterion_kd(
+                        features_s,
+                        features_t
+                    )
+                kd_losses.append(loss_kd)
+            
+            else:
+                loss_kd = torch.zeros(1)
+                if self.criterion_kd is not None:
+                    # Due to parallel execution
+                    loss_kd = self.criterion_kd(
+                        features_s,
+                        features_t
+                    )
+                kd_losses.append(loss_kd)
+
+            # Integrate all predictions
+            for i in range(rgb.shape[0]):
+                # No new prediction
+                if isListEmpty(this_batch_labels[i]):
+                    continue
+
+                # A new prediction
+                if len(np.shape(this_batch_labels[i])) == 1:
+                    this_batch_labels[i] = np.expand_dims(this_batch_labels[i], axis=0)
+                if isListEmpty(batch_labels[i]):
+                    batch_labels[i] = this_batch_labels[i]
+                    continue
+
+                # If here, both them have it, so concat
+                if len(np.shape(batch_labels[i])) == 1:
+                    batch_labels[i] = np.expand_dims(batch_labels[i], axis=0)
+                batch_labels[i] = np.concatenate(
+                    (batch_labels[i], this_batch_labels[i]), axis=0)
+
+        # Here, merge labels [0] and [1]
+        # Do so before NMS
+        # If any one is [] then it is like adding noise
+        # Notice we do not remove batch 0 and also use it as another
+        # image for gradient
+        if augment and batch_labels[1] != [] and batch_labels[0] != []:
+            batch_labels[1] = np.concatenate(
+                (batch_labels[0], batch_labels[1]), axis=0)
+            #del batch_labels[0]
+
+
+        # Non-max suppress the prediction of multiple teachers
+        for i in range(rgb.shape[0]):
+            # if augment, do go to the last non existant i
+            # that is, we merged 0 and 1 so, there is one less to process
+            #if augment and i == rgb.shape[0] - 1:
+            #    break
+
+            # No new prediction by any teacher
+            if batch_labels[i] == []:
+                continue
+            # Else, do a maximum suppresion of the prediction
+            idx = nms(
+                boxes = torch.from_numpy(batch_labels[i][:,0:4]),
+                scores= torch.from_numpy(batch_labels[i][:,4]),
+                iou_threshold=0.5
+            ).cpu().detach().numpy()
+
+            # Remove scores
+            batch_labels[i] = np.delete(batch_labels[i], 4, 1)
+
+            # keep nms index
+            batch_labels[i] = batch_labels[i][idx]
+
+
+        #if not all([np.any(elem) for elem in batch_labels]):
+        #if isListEmpty(batch_labels):
+        loss_regression, loss_cls = self.criterion_main(logits_s, batch_labels)
+
+        #print(f"regression_losses={regression_losses} {rgb.device}")
+        #print(f"classification_losses={classification_losses}")
+        #print(f"loss_div={loss_div}")
+        #print(f"loss_kd={loss_kd}")
+        return [[loss_regression], [loss_cls], kd_losses, torch.zeros(1).to(rgb.device), torch.zeros(1).to(rgb.device), torch.zeros(1).to(rgb.device)]
+
 class ModelWithNMSKDListLossAugmented(nn.Module):
     def __init__(self, student_model, teacher_models, criterion_main, criterion_div, criterion_kd, config, valid_classes_dict):
         super().__init__()
@@ -906,6 +1126,8 @@ def train(
             func = ModelWithNMSLossAugmented
         elif method == 'traditional_nms_kdlist_augmented':
             func = ModelWithNMSKDListLossAugmented
+        elif method == 'traditional_nms_augmented_with_cross_attention':
+            func = ModelWithNMSLossAugmentedWithCrossAttention
         else:
             # Notice, traditional is deprecated in favor of traditional_nms
             raise ValueError(f"unsupported train method={method}")

@@ -27,16 +27,28 @@ mp3_files = glob.glob(os.path.join(
     'audio/*mp3' if 'drive' in args.dir else '*/audio/*mp3',
 ))
 
-for audio in tqdm(mp3_files):
-    y, sr = librosa.load(audio, sr=44100)
-    S = librosa.feature.melspectrogram(
-        y=y,
-        sr=sr,
-        n_fft=1024,
-        hop_length=256,
-        n_mels=80,
-    )
-    S_dB = librosa.power_to_db(S, ref=np.max)
-    with open(audio.replace('.mp3', '.pkl'), 'wb') as handle:
-        pickle.dump(S_dB, handle, protocol=pickle.HIGHEST_PROTOCOL)
-    print(audio.replace('.mp3', '.pkl'))
+import pandas as pd
+
+df = pd.DataFrame({
+    'mp3' : mp3_files
+})
+
+pkl_files = df['mp3'].str.replace('mp3','pkl').values
+
+for idx, audio in tqdm(enumerate(mp3_files)):
+    if not os.path.exists(pkl_files[idx]):
+        try:
+            y, sr = librosa.load(audio, sr=44100)
+            S = librosa.feature.melspectrogram(
+                y=y,
+                sr=sr,
+                n_fft=1024,
+                hop_length=256,
+                n_mels=80,
+            )
+            S_dB = librosa.power_to_db(S, ref=np.max)
+            with open(audio.replace('.mp3', '.pkl'), 'wb') as handle:
+                pickle.dump(S_dB, handle, protocol=pickle.HIGHEST_PROTOCOL)
+            # print(audio.replace('.mp3', '.pkl'))
+        except:
+            print(f'Error processing: {audio}')
