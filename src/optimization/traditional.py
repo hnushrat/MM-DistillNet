@@ -126,7 +126,8 @@ def train_traditional(
 
         if config['train_method'] == 'traditional_nms_augmented':
             augment = np.random.choice([True, False], p=[0.3, 0.7])
-
+        
+        # print('GOING IN')
         result = model(
             rgb,
             thermal,

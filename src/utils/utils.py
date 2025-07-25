@@ -51,7 +51,7 @@ from src.loss.MTALoss import MTALoss
 from src.loss.DistillKL import DistillKL
 from src.loss.FocalLoss import FocalLoss
 from src.loss.YetAnotherFocalLoss import YetAnotherFocalLoss
-
+from src.loss.ContrastiveLoss import ContrastiveLoss
 
 from tabulate import tabulate
 
@@ -1594,6 +1594,8 @@ def extract_criterions_from_config(config, train_set):
     # Specialized Losses for KD
     if config['kd_loss'] == 'SimilarityLoss':
         criterion_kd = SimilarityLoss()
+    elif config['kd_loss'] == 'ContrastiveLoss':
+        criterion_kd = ContrastiveLoss(temperature = config.getfloat('temperature'))
     elif config['kd_loss'] == 'MultiTeacherPairWiseSimilarityLoss':
         criterion_kd = MultiTeacherPairWiseSimilarityLoss()
     elif config['kd_loss'] == 'AttentionLoss':

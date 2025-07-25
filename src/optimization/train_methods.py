@@ -57,21 +57,21 @@ class ModelWithNMSLossAugmentedWithCrossAttention(nn.Module):
         self.teacher_models = teacher_models
         self.config = config
         self.valid_classes_dict = valid_classes_dict
-        self.cross_attention_rgb = nn.MultiheadAttention(
-            embed_dim=config['cross_attention_embed_dim'],
-            num_heads=config['cross_attention_num_heads'],
-            dropout=config['cross_attention_dropout']
-        )
-        self.cross_attention_thermal = nn.MultiheadAttention(
-            embed_dim=config['cross_attention_embed_dim'],
-            num_heads=config['cross_attention_num_heads'],
-            dropout=config['cross_attention_dropout']
-        )
-        self.cross_attention_depth = nn.MultiheadAttention(
-            embed_dim=config['cross_attention_embed_dim'],
-            num_heads=config['cross_attention_num_heads'],
-            dropout=config['cross_attention_dropout']
-        )
+        # self.cross_attention_rgb = nn.MultiheadAttention(
+        #     embed_dim=int(config['cross_attention_embed_dim']),
+        #     num_heads=int(config['cross_attention_num_heads']),
+        #     # dropout=config['cross_attention_dropout']
+        # )
+        # self.cross_attention_thermal = nn.MultiheadAttention(
+        #     embed_dim=int(config['cross_attention_embed_dim']),
+        #     num_heads=int(config['cross_attention_num_heads']),
+        #     # dropout=config['cross_attention_dropout']
+        # )
+        # self.cross_attention_depth = nn.MultiheadAttention(
+        #     embed_dim=int(config['cross_attention_embed_dim']),
+        #     num_heads=int(config['cross_attention_num_heads']),
+        #     # dropout=config['cross_attention_dropout']
+        # )
     def average_batch_0_1(self, features_t):
 
         # features_t is a list
@@ -109,7 +109,7 @@ class ModelWithNMSLossAugmentedWithCrossAttention(nn.Module):
     def forward(self, rgb, thermal, depth, audio, label, validate=False, augment=False):
 
         # TODO, check for rgb.shape greater than 2... but unlickely case
-
+        # print('HERE!!!!')
         kd_losses = []
         if augment:
             audio = self.merge_batch_0_1(audio)
@@ -128,37 +128,27 @@ class ModelWithNMSLossAugmentedWithCrossAttention(nn.Module):
                     prediction, features_t = teacher_model(depth)
                 else:
                     raise ValueError('No valid modality to predict from teacher')
-                # Detach for kd loss calculation
-                if isinstance(features_t, tuple) or isinstance(features_t, list):
-                    features_t = [f.detach() for f in features_t]
-                else:
-                    features_t = features_t.detach()
-
-                # we have to average the feature 0 and feature 1
-                # to comply with augmentation
-                if augment:
-                    features_t = self.average_batch_0_1(features_t)
-
-                this_batch_labels = logits_to_ground_truth(
-                    logits=prediction,
-                    anchors=None,
-                    valid_classes_dict=self.valid_classes_dict,
-                    config=self.config,
-                    include_scores=True,
-                )
-
+                
             #####
-            print(features_t.shape, features_s.shape)
-            
+            # print(f't ->{len(features_t)},{type(features_t)}, s ->{len(features_s)},{type(features_s)}')
+            # for i,j in zip(features_t, features_s):
+            #     print(f'{type(i)},{i.shape} ---- {type(j)},{j.shape}')
+            '''
+            # features_t, features_s = features_t[0], features_s[0]
+            # print(features_s.view(features_s.size(0), -1, features_s.size(-1)).permute(1, 0, 2).shape)
             # the cross-attention between Teacher: features_t and Student: features_s
+            
             if self.config.getboolean('use_cross_attention'):
                 # We need to reshape the features to match the expected input of the cross-attention
-                features_s_reshaped = features_s.view(features_s.size(0), -1, features_s.size(-1)).permute(1, 0, 2)
-                features_t_reshaped = features_t.view(features_t.size(0), -1, features_t.size(-1)).permute(1, 0, 2)
+                # Using the feature map -> [112, 48, 48]
 
+                features_s_reshaped = features_s[2].view(features_s[2].size(0), -1, features_s[2].size(1))#.permute(1, 0, 2)
+                features_t_reshaped = features_t[2].view(features_t[2].size(0), -1, features_t[2].size(1))#.permute(1, 0, 2)
+                
                 if modality == 'rgb':
                     # Apply cross-attention
                     attn_output, _ = self.cross_attention_rgb(features_s_reshaped, features_t_reshaped, features_t_reshaped)
+                    print(attn_output.shape, features_s_reshaped.shape)
                     attn_map = attn_output.permute(1, 0, 2).view(features_s.size())
 
                     # add this attention map to both feature_s and feature_t
@@ -184,6 +174,25 @@ class ModelWithNMSLossAugmentedWithCrossAttention(nn.Module):
                     features_t = features_t + attn_map
 
 
+                # Detach for kd loss calculation
+                if isinstance(features_t, tuple) or isinstance(features_t, list):
+                    features_t = [f.detach() for f in features_t]
+                else:
+                    features_t = features_t.detach()
+
+                # we have to average the feature 0 and feature 1
+                # to comply with augmentation
+                if augment:
+                    features_t = self.average_batch_0_1(features_t)
+
+                this_batch_labels = logits_to_ground_truth(
+                    logits=prediction,
+                    anchors=None,
+                    valid_classes_dict=self.valid_classes_dict,
+                    config=self.config,
+                    include_scores=True,
+                )
+
                 loss_kd = torch.zeros(1)
                 if self.criterion_kd is not None:
                     # Due to parallel execution
@@ -192,8 +201,75 @@ class ModelWithNMSLossAugmentedWithCrossAttention(nn.Module):
                         features_t
                     )
                 kd_losses.append(loss_kd)
-            
+            '''
+            if self.config.getboolean('use_cross_attention'):
+                '''
+                FOR RGB
+                take (112,6,6) feature map -> find max across channel dim 112 -> (6,6);
+                then find top-3 points from (6,6) and their indices;
+                locate these indices in the original (112,6,6) -> (112,3)
+
+                Contrastive loss:
+                
+                among rgb and audio -> 6 vectors; positive are rgb_idx == audio_idx, others neg;
+
+                '''
+                max_across_channels = torch.max(features_t[-1], dim = 1)
+                # reshape (batch, map * map)
+                max_across_channels = max_across_channels.values.view(max_across_channels.values.shape[0], -1)
+
+                top_k = self.config.getint('top_k')
+
+                sorted_in_each_6_6 = torch.sort(max_across_channels, dim = 1)
+                
+                # top_vectors_values = sorted_in_each_6_6.values[:, -top_k:]
+                top_vectors_indices = sorted_in_each_6_6.indices[:, -top_k:] # pass these indices to contrastive loss function
+
+                reshaped_features_t = features_t[-1].view(features_t[-1].shape[0], features_t[-1].shape[1], -1)
+                reshaped_features_s = features_s[-1].view(features_s[-1].shape[0], features_s[-1].shape[1], -1)
+
+                # we have to average the feature 0 and feature 1
+                # to comply with augmentation
+                if augment:
+                    features_t = self.average_batch_0_1(features_t)
+
+                this_batch_labels = logits_to_ground_truth(
+                    logits=prediction,
+                    anchors=None,
+                    valid_classes_dict=self.valid_classes_dict,
+                    config=self.config,
+                    include_scores=True,
+                )
+                loss_kd = torch.zeros(1)
+                if self.criterion_kd is not None:
+                    # Due to parallel execution
+                    loss_kd = self.criterion_kd(
+                        reshaped_features_s,
+                        reshaped_features_t,
+                        top_vectors_indices
+                    )
+                kd_losses.append(loss_kd)
+
             else:
+                # Detach for kd loss calculation
+                if isinstance(features_t, tuple) or isinstance(features_t, list):
+                    features_t = [f.detach() for f in features_t]
+                else:
+                    features_t = features_t.detach()
+
+                # we have to average the feature 0 and feature 1
+                # to comply with augmentation
+                if augment:
+                    features_t = self.average_batch_0_1(features_t)
+
+                this_batch_labels = logits_to_ground_truth(
+                    logits=prediction,
+                    anchors=None,
+                    valid_classes_dict=self.valid_classes_dict,
+                    config=self.config,
+                    include_scores=True,
+                )
+
                 loss_kd = torch.zeros(1)
                 if self.criterion_kd is not None:
                     # Due to parallel execution
@@ -1167,6 +1243,7 @@ def train(
         logger.info(f"Parallel exec for {config.getint('ngpu')} GPUs")
         if config['engine'] == 'DataParallel':
             # On Resume, prevent a teacher model of teacher model
+            model = model.to('cuda')
             if not type(model) == torch.nn.DataParallel:
                 model = nn.DataParallel(
                     model,
