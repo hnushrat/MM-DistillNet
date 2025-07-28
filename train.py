@@ -153,7 +153,7 @@ def train_multimodal_detection(config):
         config=config,
         mode="val",
     )
-
+    print(f'VAL-DATA : {len(val_set)}\n\n')
     student_model = load_model(config['student'], config, 'audio_student').to(device)
     logger.debug(f"student_model={student_model}")
 
@@ -204,7 +204,7 @@ def train_multimodal_detection(config):
     # load params
     student_model.load_state_dict(new_state_dict)
     student_model.eval()
-    print('HERE----')
+    # print('HERE----')
     evaluate(
         teacher_models,
         student_model,
